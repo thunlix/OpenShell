@@ -18,6 +18,9 @@ pub struct Config {
     /// TLS configuration.
     #[serde(default)]
     pub tls: Option<TlsConfig>,
+
+    /// Database URL for persistence.
+    pub database_url: String,
 }
 
 /// TLS configuration.
@@ -36,6 +39,7 @@ impl Default for Config {
             bind_address: default_bind_address(),
             log_level: default_log_level(),
             tls: None,
+            database_url: String::new(),
         }
     }
 }
@@ -70,6 +74,13 @@ impl Config {
             cert_path,
             key_path,
         });
+        self
+    }
+
+    /// Create a new configuration with a database URL.
+    #[must_use]
+    pub fn with_database_url(mut self, url: impl Into<String>) -> Self {
+        self.database_url = url.into();
         self
     }
 }

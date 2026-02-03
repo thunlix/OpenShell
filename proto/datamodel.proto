@@ -1,0 +1,6 @@
+syntax = "proto3";
+
+package navigator.datamodel.v1;
+
+// Placeholder to keep this file generating code until real datamodel protos land.
+message Sandbox {}

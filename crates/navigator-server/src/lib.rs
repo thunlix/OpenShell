@@ -9,6 +9,7 @@
 mod grpc;
 mod http;
 mod multiplex;
+mod persistence;
 mod tls;
 
 use navigator_core::{Config, Error, Result};
@@ -20,6 +21,7 @@ use tracing::{error, info};
 pub use grpc::NavigatorService;
 pub use http::health_router;
 pub use multiplex::MultiplexService;
+use persistence::Store;
 pub use tls::TlsAcceptor;
 
 /// Server state shared across handlers.
@@ -30,15 +32,19 @@ pub struct ServerState {
 
     /// Server configuration.
     pub config: Config,
+
+    /// Persistence store.
+    pub store: Arc<Store>,
 }
 
 impl ServerState {
     /// Create new server state.
     #[must_use]
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config, store: Arc<Store>) -> Self {
         Self {
             start_time: Instant::now(),
             config,
+            store,
         }
     }
 
@@ -57,7 +63,13 @@ impl ServerState {
 ///
 /// Returns an error if the server fails to start or encounters a fatal error.
 pub async fn run_server(config: Config) -> Result<()> {
-    let state = Arc::new(ServerState::new(config.clone()));
+    let database_url = config.database_url.trim();
+    if database_url.is_empty() {
+        return Err(Error::config("database_url is required"));
+    }
+
+    let store = Store::connect(database_url).await?;
+    let state = Arc::new(ServerState::new(config.clone(), Arc::new(store)));
 
     // Create the multiplexed service
     let service = MultiplexService::new(state.clone());

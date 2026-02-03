@@ -29,6 +29,10 @@ struct Args {
     /// Path to TLS private key file.
     #[arg(long, env = "NAVIGATOR_TLS_KEY")]
     tls_key: Option<PathBuf>,
+
+    /// Database URL for persistence.
+    #[arg(long, env = "NAVIGATOR_DB_URL", required = true)]
+    db_url: String,
 }
 
 #[tokio::main]
@@ -50,6 +54,8 @@ async fn main() -> Result<()> {
     if let (Some(cert), Some(key)) = (args.tls_cert, args.tls_key) {
         config = config.with_tls(cert, key);
     }
+
+    config = config.with_database_url(args.db_url);
 
     info!(bind = %config.bind_address, "Starting Navigator server");
 
