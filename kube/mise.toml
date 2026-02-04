@@ -25,14 +25,14 @@ if k3d cluster list | grep -q "^${CLUSTER_NAME}"; then
         fi
         k3d cluster create "${CLUSTER_NAME}" \
             --registry-create "${REGISTRY_NAME}:0.0.0.0:${REGISTRY_PORT}" \
-            --port "50051:30051@loadbalancer" \
+            --port "8080:30051@loadbalancer" \
             --wait
     fi
 else
     echo "Creating cluster '${CLUSTER_NAME}' with registry..."
     k3d cluster create "${CLUSTER_NAME}" \
         --registry-create "${REGISTRY_NAME}:0.0.0.0:${REGISTRY_PORT}" \
-        --port "50051:30051@loadbalancer" \
+        --port "8080:30051@loadbalancer" \
         --wait
 fi
 

@@ -10,7 +10,7 @@ use tracing::debug;
 ///
 /// # Arguments
 ///
-/// * `endpoint` - The Navigator server gRPC endpoint (e.g., `http://navigator:50051`)
+/// * `endpoint` - The Navigator server gRPC endpoint (e.g., `http://navigator:8080`)
 /// * `sandbox_id` - The sandbox ID to fetch policy for
 ///
 /// # Errors

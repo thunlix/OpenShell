@@ -112,7 +112,7 @@ mise run kube:dev        # Dev mode with hot reload
 mise run test:e2e:sandbox # Run sandbox e2e tests via skaffold verify
 ```
 
-The cluster exposes port 50051 for the server and includes a local registry at `localhost:5000`.
+The cluster exposes port 8080 for the server and includes a local registry at `localhost:5000`.
 
 The sandbox E2E task uses a Skaffold profile (`e2e-sandbox`) that loads images directly into the
 k3d cluster instead of pushing to a registry.

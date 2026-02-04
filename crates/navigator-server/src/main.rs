@@ -14,9 +14,9 @@ use navigator_server::{run_server, tracing_bus::TracingLogBus};
 #[command(name = "navigator-server")]
 #[command(about = "Navigator gRPC/HTTP server", long_about = None)]
 struct Args {
-    /// Address to bind the server to.
-    #[arg(long, short, default_value = "127.0.0.1:50051", env = "NAVIGATOR_BIND")]
-    bind: SocketAddr,
+    /// Port to bind the server to (all interfaces).
+    #[arg(long, default_value_t = 8080, env = "NAVIGATOR_SERVER_PORT")]
+    port: u16,
 
     /// Log level (trace, debug, info, warn, error).
     #[arg(long, default_value = "info", env = "NAVIGATOR_LOG_LEVEL")]
@@ -63,8 +63,10 @@ async fn main() -> Result<()> {
     );
 
     // Build configuration
+    let bind = SocketAddr::from(([0, 0, 0, 0], args.port));
+
     let mut config = navigator_core::Config::default()
-        .with_bind_address(args.bind)
+        .with_bind_address(bind)
         .with_log_level(&args.log_level);
 
     if let (Some(cert), Some(key)) = (args.tls_cert, args.tls_key) {

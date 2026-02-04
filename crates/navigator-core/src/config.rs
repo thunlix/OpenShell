@@ -61,7 +61,7 @@ impl Default for Config {
 }
 
 fn default_bind_address() -> SocketAddr {
-    "127.0.0.1:50051".parse().expect("valid default address")
+    "0.0.0.0:8080".parse().expect("valid default address")
 }
 
 fn default_log_level() -> String {

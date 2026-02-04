@@ -24,10 +24,14 @@ impl TlsAcceptor {
         let certs = load_certs(cert_path)?;
         let key = load_key(key_path)?;
 
-        let config = ServerConfig::builder()
+        let mut config = ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(certs, key)
             .map_err(|e| Error::tls(format!("failed to create TLS config: {e}")))?;
+
+        config
+            .alpn_protocols
+            .extend([b"h2".to_vec(), b"http/1.1".to_vec()]);
 
         Ok(Self {
             acceptor: tokio_rustls::TlsAcceptor::from(Arc::new(config)),

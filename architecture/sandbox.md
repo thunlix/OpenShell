@@ -40,7 +40,7 @@ via gRPC instead of reading from a local file. This is the preferred mode for pr
 The pod template automatically injects these environment variables:
 
 - `NAVIGATOR_SANDBOX_ID`: The sandbox entity ID in Navigator's store
-- `NAVIGATOR_ENDPOINT`: gRPC endpoint for the Navigator server (e.g., `http://navigator:50051`)
+- `NAVIGATOR_ENDPOINT`: gRPC endpoint for the Navigator server (e.g., `http://navigator:8080`)
 - `NAVIGATOR_SANDBOX_COMMAND`: The command to execute inside the sandbox (user-provided, defaults to `/bin/bash` if not set)
 
 ### Startup Flow

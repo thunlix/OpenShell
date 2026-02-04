@@ -48,8 +48,8 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
-            - --bind
-            - "0.0.0.0:50051"
+            - --port
+            - {{ .Values.service.port | quote }}
             - --log-level
             - {{ .Values.server.logLevel }}
             - --db-url
@@ -66,7 +66,7 @@ spec:
               mountPath: /var/navigator
           ports:
             - name: grpc
-              containerPort: 50051
+              containerPort: {{ .Values.service.port }}
               protocol: TCP
           livenessProbe:
             httpGet:

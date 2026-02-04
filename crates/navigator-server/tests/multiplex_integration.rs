@@ -1,0 +1,138 @@
+use bytes::Bytes;
+use http_body_util::Empty;
+use hyper::{Request, StatusCode};
+use hyper_util::{
+    rt::{TokioExecutor, TokioIo},
+    server::conn::auto::Builder,
+};
+use navigator_core::proto::{
+    CreateSandboxRequest, DeleteSandboxRequest, DeleteSandboxResponse, GetSandboxPolicyRequest,
+    GetSandboxPolicyResponse, GetSandboxRequest, HealthRequest, HealthResponse,
+    ListSandboxesRequest, ListSandboxesResponse, SandboxResponse, SandboxStreamEvent,
+    ServiceStatus, WatchSandboxRequest,
+    navigator_client::NavigatorClient,
+    navigator_server::{Navigator, NavigatorServer},
+};
+use navigator_server::{MultiplexedService, health_router};
+use tokio::net::TcpListener;
+use tokio_stream::wrappers::ReceiverStream;
+use tonic::{Response, Status};
+
+#[derive(Clone, Default)]
+struct TestNavigator;
+
+#[tonic::async_trait]
+impl Navigator for TestNavigator {
+    async fn health(
+        &self,
+        _request: tonic::Request<HealthRequest>,
+    ) -> Result<Response<HealthResponse>, Status> {
+        Ok(Response::new(HealthResponse {
+            status: ServiceStatus::Healthy.into(),
+            version: "test".to_string(),
+        }))
+    }
+
+    async fn create_sandbox(
+        &self,
+        _request: tonic::Request<CreateSandboxRequest>,
+    ) -> Result<Response<SandboxResponse>, Status> {
+        Err(Status::unimplemented(
+            "create_sandbox not implemented in test",
+        ))
+    }
+
+    async fn get_sandbox(
+        &self,
+        _request: tonic::Request<GetSandboxRequest>,
+    ) -> Result<Response<SandboxResponse>, Status> {
+        Err(Status::unimplemented("get_sandbox not implemented in test"))
+    }
+
+    async fn list_sandboxes(
+        &self,
+        _request: tonic::Request<ListSandboxesRequest>,
+    ) -> Result<Response<ListSandboxesResponse>, Status> {
+        Err(Status::unimplemented(
+            "list_sandboxes not implemented in test",
+        ))
+    }
+
+    async fn delete_sandbox(
+        &self,
+        _request: tonic::Request<DeleteSandboxRequest>,
+    ) -> Result<Response<DeleteSandboxResponse>, Status> {
+        Err(Status::unimplemented(
+            "delete_sandbox not implemented in test",
+        ))
+    }
+
+    async fn get_sandbox_policy(
+        &self,
+        _request: tonic::Request<GetSandboxPolicyRequest>,
+    ) -> Result<Response<GetSandboxPolicyResponse>, Status> {
+        Err(Status::unimplemented(
+            "get_sandbox_policy not implemented in test",
+        ))
+    }
+
+    type WatchSandboxStream = ReceiverStream<Result<SandboxStreamEvent, Status>>;
+
+    async fn watch_sandbox(
+        &self,
+        _request: tonic::Request<WatchSandboxRequest>,
+    ) -> Result<Response<Self::WatchSandboxStream>, Status> {
+        Err(Status::unimplemented(
+            "watch_sandbox not implemented in test",
+        ))
+    }
+}
+
+#[tokio::test]
+async fn serves_grpc_and_http_on_same_port() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let grpc_service = NavigatorServer::new(TestNavigator);
+    let http_service = health_router();
+    let service = MultiplexedService::new(grpc_service, http_service);
+
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                continue;
+            };
+            let svc = service.clone();
+            tokio::spawn(async move {
+                let _ = Builder::new(TokioExecutor::new())
+                    .serve_connection(TokioIo::new(stream), svc)
+                    .await;
+            });
+        }
+    });
+
+    let mut client = NavigatorClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap();
+    let response = client.health(HealthRequest {}).await.unwrap();
+    assert_eq!(response.get_ref().status, ServiceStatus::Healthy as i32);
+
+    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (mut sender, conn) = hyper::client::conn::http1::Builder::new()
+        .handshake(TokioIo::new(stream))
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("http://{addr}/healthz"))
+        .body(Empty::<Bytes>::new())
+        .unwrap();
+    let resp = sender.send_request(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    server.abort();
+}

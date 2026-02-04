@@ -23,7 +23,7 @@ use tracing::{error, info};
 
 pub use grpc::NavigatorService;
 pub use http::health_router;
-pub use multiplex::MultiplexService;
+pub use multiplex::{MultiplexService, MultiplexedService};
 use persistence::Store;
 use sandbox::{SandboxClient, spawn_sandbox_watcher};
 use sandbox_index::SandboxIndex;
@@ -127,6 +127,12 @@ pub async fn run_server(config: Config, tracing_log_bus: TracingLogBus) -> Resul
 
     info!(address = %config.bind_address, "Server listening");
 
+    let tls_acceptor = if let Some(tls) = &config.tls {
+        Some(TlsAcceptor::from_files(&tls.cert_path, &tls.key_path)?)
+    } else {
+        None
+    };
+
     // Accept connections
     loop {
         let (stream, addr) = match listener.accept().await {
@@ -138,9 +144,21 @@ pub async fn run_server(config: Config, tracing_log_bus: TracingLogBus) -> Resul
         };
 
         let service = service.clone();
+        let tls_acceptor = tls_acceptor.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = service.serve(stream).await {
+            if let Some(tls) = tls_acceptor {
+                match tls.inner().accept(stream).await {
+                    Ok(tls_stream) => {
+                        if let Err(e) = service.serve(tls_stream).await {
+                            error!(error = %e, client = %addr, "Connection error");
+                        }
+                    }
+                    Err(e) => {
+                        error!(error = %e, client = %addr, "TLS handshake failed");
+                    }
+                }
+            } else if let Err(e) = service.serve(stream).await {
                 error!(error = %e, client = %addr, "Connection error");
             }
         });

@@ -16,7 +16,7 @@ REPO_PROTO_DIR = pathlib.Path(__file__).resolve().parents[2] / "proto"
 PROTO_DIR = pathlib.Path(os.environ.get("NAVIGATOR_PROTO_DIR", DEFAULT_PROTO_DIR))
 if not PROTO_DIR.exists():
     PROTO_DIR = REPO_PROTO_DIR
-DEFAULT_ADDR = "navigator.navigator.svc.cluster.local:50051"
+DEFAULT_ADDR = "navigator.navigator.svc.cluster.local:8080"
 
 
 def generate_protos() -> pathlib.Path:

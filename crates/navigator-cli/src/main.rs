@@ -19,7 +19,7 @@ struct Cli {
     #[arg(
         long,
         short,
-        default_value = "http://127.0.0.1:50051",
+        default_value = "http://127.0.0.1:8080",
         global = true,
         env = "NAVIGATOR_CLUSTER"
     )]

@@ -17,7 +17,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tower::ServiceExt;
 
 use crate::{NavigatorService, ServerState, health_router};
@@ -37,17 +37,14 @@ impl MultiplexService {
     }
 
     /// Serve a connection, routing to gRPC or HTTP based on content-type.
-    pub async fn serve(
-        &self,
-        stream: TcpStream,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn serve<S>(&self, stream: S) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
         let grpc_service = NavigatorServer::new(NavigatorService::new(self.state.clone()));
         let http_service = health_router();
 
-        let service = MultiplexedService {
-            grpc: grpc_service,
-            http: http_service,
-        };
+        let service = MultiplexedService::new(grpc_service, http_service);
 
         Builder::new(TokioExecutor::new())
             .serve_connection(TokioIo::new(stream), service)
@@ -59,9 +56,17 @@ impl MultiplexService {
 
 /// Service that multiplexes between gRPC and HTTP.
 #[derive(Clone)]
-struct MultiplexedService<G, H> {
+pub struct MultiplexedService<G, H> {
     grpc: G,
     http: H,
+}
+
+impl<G, H> MultiplexedService<G, H> {
+    /// Create a new multiplexed service from gRPC and HTTP services.
+    #[must_use]
+    pub fn new(grpc: G, http: H) -> Self {
+        Self { grpc, http }
+    }
 }
 
 impl<G, H, GBody, HBody> hyper::service::Service<Request<Incoming>> for MultiplexedService<G, H>
@@ -130,7 +135,7 @@ where
 }
 
 /// Boxed body type for uniform handling.
-struct BoxBody(
+pub struct BoxBody(
     http_body_util::combinators::UnsyncBoxBody<Bytes, Box<dyn std::error::Error + Send + Sync>>,
 );
 

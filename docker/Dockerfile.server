@@ -69,12 +69,12 @@ COPY crates/navigator-server/migrations /build/crates/navigator-server/migration
 USER navigator
 
 # Expose gRPC/HTTP port
-EXPOSE 50051
+EXPOSE 8080
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:50051/healthz || exit 1
+    CMD curl -f http://localhost:8080/healthz || exit 1
 
 # Run server binding to all interfaces
 ENTRYPOINT ["navigator-server"]
-CMD ["--bind", "0.0.0.0:50051"]
+CMD ["--port", "8080"]
