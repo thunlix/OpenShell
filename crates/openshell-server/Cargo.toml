@@ -41,6 +41,7 @@ http-body-util = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
+webpki-roots = { workspace = true }
 
 # CLI
 clap = { workspace = true }
@@ -70,6 +71,7 @@ uuid = { workspace = true }
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
+hostname = "0.4"
 russh = "0.57"
 rand = "0.9"
 petname = "2"

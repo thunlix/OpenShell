@@ -21,6 +21,7 @@ mod sandbox_watch;
 mod ssh_tunnel;
 mod tls;
 pub mod tracing_bus;
+pub mod syslog_export;
 mod ws_tunnel;
 
 use openshell_core::{Config, Error, Result};

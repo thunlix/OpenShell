@@ -19,6 +19,13 @@ use tracing_subscriber::{EnvFilter, Layer};
 pub struct TracingLogBus {
     inner: Arc<Mutex<Inner>>,
     pub(crate) platform_event_bus: PlatformEventBus,
+    /// Global broadcast of every `SandboxLogLine` passing through this bus.
+    ///
+    /// Used by the syslog exporter (and any other cross-sandbox subscriber)
+    /// to receive events from all sandboxes without needing to subscribe
+    /// per-sandbox.  The sender is kept alive for the lifetime of the bus;
+    /// receivers are created via [`TracingLogBus::subscribe_all`].
+    global_tx: broadcast::Sender<SandboxLogLine>,
 }
 
 #[derive(Debug)]
@@ -36,19 +43,32 @@ impl Default for TracingLogBus {
 impl TracingLogBus {
     #[must_use]
     pub fn new() -> Self {
+        let (global_tx, _) = broadcast::channel(4096);
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 per_id: HashMap::new(),
                 tails: HashMap::new(),
             })),
             platform_event_bus: PlatformEventBus::new(),
+            global_tx,
         }
+    }
+
+    /// Subscribe to every `SandboxLogLine` published through this bus,
+    /// across all sandboxes.  Intended for cross-sandbox consumers such as
+    /// the syslog exporter.
+    ///
+    /// The receiver will see [`broadcast::error::RecvError::Lagged`] if it
+    /// falls behind — callers should handle this gracefully (log + continue).
+    pub fn subscribe_all(&self) -> broadcast::Receiver<SandboxLogLine> {
+        self.global_tx.subscribe()
     }
 
     /// Install a tracing subscriber that logs to stdout and publishes events into this bus.
     pub fn install_subscriber(&self, env_filter: EnvFilter) {
         let layer = SandboxLogLayer {
             bus: self.clone(),
+            global_tx: self.global_tx.clone(),
             default_tail: Self::DEFAULT_TAIL,
         };
 
@@ -108,6 +128,7 @@ impl TracingLogBus {
                 log.clone(),
             )),
         };
+        let _ = self.global_tx.send(log.clone());
         self.publish(&log.sandbox_id, evt, Self::DEFAULT_TAIL);
     }
 
@@ -130,6 +151,7 @@ impl TracingLogBus {
 #[derive(Debug, Clone)]
 struct SandboxLogLayer {
     bus: TracingLogBus,
+    global_tx: broadcast::Sender<SandboxLogLine>,
     default_tail: usize,
 }
 
@@ -158,6 +180,7 @@ where
             source: "gateway".to_string(),
             fields: HashMap::new(),
         };
+        let _ = self.global_tx.send(log.clone());
         let evt = SandboxStreamEvent {
             payload: Some(openshell_core::proto::sandbox_stream_event::Payload::Log(
                 log,

@@ -10,7 +10,11 @@ use std::path::PathBuf;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-use openshell_server::{run_server, tracing_bus::TracingLogBus};
+use openshell_server::{
+    run_server,
+    syslog_export::{SyslogConfig, SyslogMinLevel, SyslogProtocol, SyslogTlsConfig},
+    tracing_bus::TracingLogBus,
+};
 
 /// `OpenShell` Server - gRPC and HTTP server with protocol multiplexing.
 #[derive(Parser, Debug)]
@@ -108,6 +112,65 @@ struct Args {
     /// certificate. Ignored when --disable-tls is set.
     #[arg(long, env = "OPENSHELL_DISABLE_GATEWAY_AUTH")]
     disable_gateway_auth: bool,
+
+    /// Syslog collector address for policy event forwarding (host:port).
+    ///
+    /// When set, policy denial and L7 inspection events are forwarded to this
+    /// address in CEF format over TCP or UDP syslog.  Compatible with Palo
+    /// Alto Networks XSIAM and any RFC 5424-compliant collector.
+    ///
+    /// Example: `10.0.0.1:514`
+    #[arg(long, env = "OPENSHELL_SYSLOG_TARGET")]
+    syslog_target: Option<std::net::SocketAddr>,
+
+    /// Syslog transport protocol: `tcp` (default) or `udp`.
+    ///
+    /// TCP uses RFC 5425 octet-count framing; UDP sends one datagram per
+    /// message.  TCP is recommended for XSIAM.
+    #[arg(long, env = "OPENSHELL_SYSLOG_PROTOCOL", default_value = "tcp")]
+    syslog_protocol: String,
+
+    /// Minimum log level to forward to syslog: `info` (default), `warn`, or `error`.
+    ///
+    /// Set to `warn` or `error` to reduce volume; set to `info` to forward
+    /// all policy allow/deny/audit decisions.
+    #[arg(long, env = "OPENSHELL_SYSLOG_LEVEL", default_value = "info")]
+    syslog_level: String,
+
+    /// Hostname reported in syslog messages.
+    ///
+    /// Defaults to the OS hostname.  Set explicitly in containerised
+    /// deployments where the pod hostname is not meaningful.
+    #[arg(long, env = "OPENSHELL_SYSLOG_HOSTNAME")]
+    syslog_hostname: Option<String>,
+
+    /// Enable TLS for syslog TCP transport (RFC 5425).
+    ///
+    /// When set, the TCP connection to --syslog-target is wrapped in TLS.
+    /// Requires --syslog-tls-server-name.  Ignored when --syslog-protocol=udp.
+    #[arg(long, env = "OPENSHELL_SYSLOG_TLS")]
+    syslog_tls: bool,
+
+    /// SNI server name for syslog TLS handshake.
+    ///
+    /// Required when --syslog-tls is set.  Must match the CN or a SAN in the
+    /// collector's certificate (e.g. `syslog.xsiam.example.com`).
+    #[arg(long, env = "OPENSHELL_SYSLOG_TLS_SERVER_NAME")]
+    syslog_tls_server_name: Option<String>,
+
+    /// Path to a PEM-encoded CA certificate for verifying the syslog collector.
+    ///
+    /// When omitted, the Mozilla root CA bundle is used.  Set this when the
+    /// XSIAM collector uses a certificate signed by a private/internal CA.
+    #[arg(long, env = "OPENSHELL_SYSLOG_TLS_CA")]
+    syslog_tls_ca: Option<std::path::PathBuf>,
+
+    /// Skip TLS certificate verification for the syslog collector.
+    ///
+    /// The connection is still encrypted.  Use only in non-production
+    /// environments with self-signed certificates.
+    #[arg(long, env = "OPENSHELL_SYSLOG_TLS_SKIP_VERIFY")]
+    syslog_tls_skip_verify: bool,
 }
 
 #[tokio::main]
@@ -192,6 +255,59 @@ async fn main() -> Result<()> {
         info!("TLS disabled — listening on plaintext HTTP");
     } else if args.disable_gateway_auth {
         info!("Gateway auth disabled — accepting connections without client certificates");
+    }
+
+    // Syslog exporter — optional, enabled only when --syslog-target is set.
+    if let Some(syslog_target) = args.syslog_target {
+        let protocol = match args.syslog_protocol.to_ascii_lowercase().as_str() {
+            "udp" => SyslogProtocol::Udp,
+            _ => SyslogProtocol::Tcp,
+        };
+        let min_level = match args.syslog_level.to_ascii_lowercase().as_str() {
+            "error" => SyslogMinLevel::Error,
+            "warn" | "warning" => SyslogMinLevel::Warn,
+            _ => SyslogMinLevel::Info,
+        };
+        let hostname = args
+            .syslog_hostname
+            .or_else(|| hostname::get().ok()?.into_string().ok())
+            .unwrap_or_else(|| "openshell-server".to_string());
+
+        // Build TLS config if --syslog-tls was requested.
+        let tls = if args.syslog_tls {
+            let server_name = args.syslog_tls_server_name.ok_or_else(|| {
+                miette::miette!(
+                    "--syslog-tls-server-name is required when --syslog-tls is set"
+                )
+            })?;
+            Some(SyslogTlsConfig {
+                server_name,
+                ca_cert: args.syslog_tls_ca,
+                skip_verify: args.syslog_tls_skip_verify,
+            })
+        } else {
+            None
+        };
+
+        let tls_enabled = tls.is_some();
+        let syslog_cfg = SyslogConfig {
+            target: syslog_target,
+            protocol,
+            min_level,
+            hostname: hostname.clone(),
+            tls,
+        };
+
+        let rx = tracing_log_bus.subscribe_all();
+        openshell_server::syslog_export::spawn_syslog_exporter(rx, syslog_cfg);
+        info!(
+            target = %syslog_target,
+            protocol = %args.syslog_protocol,
+            level = %args.syslog_level,
+            hostname = %hostname,
+            tls = tls_enabled,
+            "Syslog export enabled"
+        );
     }
 
     info!(bind = %config.bind_address, "Starting OpenShell server");
