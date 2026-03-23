@@ -36,6 +36,39 @@ struct PolicyFile {
     process: Option<ProcessDef>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     network_policies: BTreeMap<String, NetworkPolicyRuleDef>,
+    /// Tether integration config. Not part of the OPA/proto pipeline —
+    /// consumed directly by the Tether bridge in the sandbox supervisor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tether: Option<TetherDef>,
+}
+
+/// Tether integration configuration (YAML-only, not part of proto).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TetherDef {
+    /// Whether the Tether bridge is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Tether server endpoint URL.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub endpoint: String,
+    /// Task ID in Tether to report against.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub task_id: String,
+    /// Enforcement mode: "enforce" or "monitor" (default).
+    #[serde(default = "default_tether_mode")]
+    pub mode: String,
+    /// Activity report interval in seconds.
+    #[serde(default = "default_report_interval")]
+    pub report_interval: u64,
+}
+
+fn default_tether_mode() -> String {
+    "monitor".into()
+}
+
+fn default_report_interval() -> u64 {
+    30
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -353,6 +386,31 @@ pub fn load_sandbox_policy(cli_path: Option<&str>) -> Result<Option<SandboxPolic
         return Ok(None);
     };
     parse_sandbox_policy(&contents).map(Some)
+}
+
+/// Parse Tether integration config from a policy YAML string.
+///
+/// Returns `None` if the YAML has no `tether` section or `tether.enabled`
+/// is false. This is intentionally separate from [`parse_sandbox_policy`]
+/// because the Tether config is not part of the proto/OPA pipeline.
+pub fn parse_tether_config(yaml: &str) -> Option<TetherDef> {
+    let raw: PolicyFile = serde_yaml::from_str(yaml).ok()?;
+    raw.tether.filter(|t| t.enabled)
+}
+
+/// Load Tether config from the same policy file as the sandbox policy.
+///
+/// Reads from `cli_path`, then `OPENSHELL_SANDBOX_POLICY` env var.
+/// Returns `None` if no policy file is found or Tether is not configured.
+pub fn load_tether_config(cli_path: Option<&str>) -> Option<TetherDef> {
+    let contents = if let Some(p) = cli_path {
+        std::fs::read_to_string(p).ok()?
+    } else if let Ok(policy_path) = std::env::var("OPENSHELL_SANDBOX_POLICY") {
+        std::fs::read_to_string(policy_path).ok()?
+    } else {
+        return None;
+    };
+    parse_tether_config(&contents)
 }
 
 /// Well-known path where a sandbox container image can ship a policy YAML file.

@@ -5,6 +5,7 @@
 //!
 //! This crate provides process sandboxing and monitoring capabilities.
 
+pub mod activity_aggregator;
 pub mod bypass_monitor;
 mod child_env;
 pub mod denial_aggregator;
@@ -21,6 +22,7 @@ pub mod proxy;
 mod sandbox;
 mod secrets;
 mod ssh;
+pub mod tether_bridge;
 
 use miette::{IntoDiagnostic, Result};
 #[cfg(target_os = "linux")]
@@ -297,7 +299,7 @@ pub async fn run_sandbox(
     // the entrypoint process's /proc/net/tcp for identity binding.
     let entrypoint_pid = Arc::new(AtomicU32::new(0));
 
-    let (_proxy, denial_rx, bypass_denial_tx) = if matches!(policy.network.mode, NetworkMode::Proxy)
+    let (_proxy, denial_rx, bypass_denial_tx, _activity_rx) = if matches!(policy.network.mode, NetworkMode::Proxy)
     {
         let proxy_policy = policy.network.proxy.as_ref().ok_or_else(|| {
             miette::miette!("Network mode is set to proxy but no proxy configuration was provided")
@@ -340,6 +342,16 @@ pub async fn run_sandbox(
             (None, None, None)
         };
 
+        // Create activity aggregator channel for tracking allowed connections.
+        // Used by the Tether bridge (when configured) to report ground-truth
+        // agent activity for drift detection.
+        let (activity_tx, activity_rx) = if sandbox_id.is_some() {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
+
         let proxy_handle = ProxyHandle::start_with_bind_addr(
             proxy_policy,
             bind_addr,
@@ -350,11 +362,12 @@ pub async fn run_sandbox(
             inference_ctx,
             secret_resolver.clone(),
             denial_tx,
+            activity_tx,
         )
         .await?;
-        (Some(proxy_handle), denial_rx, bypass_denial_tx)
+        (Some(proxy_handle), denial_rx, bypass_denial_tx, activity_rx)
     } else {
-        (None, None, None)
+        (None, None, None, None)
     };
 
     // Spawn bypass detection monitor (Linux only, proxy mode only).
@@ -541,6 +554,11 @@ pub async fn run_sandbox(
         }
     }
 
+    // Channel for Tether halt signal. The activity aggregator sends on this
+    // channel when the bridge receives a "halt" verdict in enforce mode.
+    // The main wait loop races against this to terminate the sandbox.
+    let (tether_halt_tx, mut tether_halt_rx) = tokio::sync::mpsc::channel::<()>(1);
+
     #[cfg(target_os = "linux")]
     let mut handle = ProcessHandle::spawn(
         program,
@@ -589,6 +607,9 @@ pub async fn run_sandbox(
             }
         });
 
+        // Create Tether bridge if configured (opt-in via env vars).
+        let tether = tether_bridge::make_tether_bridge();
+
         // Spawn denial aggregator (gRPC mode only, when proxy is active).
         if let Some(rx) = denial_rx {
             // SubmitPolicyAnalysis resolves by sandbox *name*, not UUID.
@@ -598,6 +619,7 @@ pub async fn run_sandbox(
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(10);
+            let tether_for_denials = tether.clone();
 
             let aggregator = denial_aggregator::DenialAggregator::new(rx, flush_interval_secs);
 
@@ -606,12 +628,57 @@ pub async fn run_sandbox(
                     .run(|summaries| {
                         let endpoint = agg_endpoint.clone();
                         let sandbox_name = agg_name.clone();
+                        let bridge = tether_for_denials.clone();
                         async move {
+                            // Fan out: gateway + Tether bridge
                             if let Err(e) =
-                                flush_proposals_to_gateway(&endpoint, &sandbox_name, summaries)
+                                flush_proposals_to_gateway(&endpoint, &sandbox_name, summaries.clone())
                                     .await
                             {
                                 warn!(error = %e, "Failed to flush denial summaries to gateway");
+                            }
+                            if let Some(ref b) = bridge {
+                                b.report_denials(&summaries).await;
+                            }
+                        }
+                    })
+                    .await;
+            });
+        }
+
+        // Spawn activity aggregator (when proxy is active and Tether is configured).
+        if let (Some(rx), Some(bridge)) = (_activity_rx, tether.clone()) {
+            let flush_interval_secs: u64 = std::env::var("TETHER_REPORT_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30);
+            let halt_tx = tether_halt_tx.clone();
+
+            let aggregator =
+                activity_aggregator::ActivityAggregator::new(rx, flush_interval_secs);
+
+            tokio::spawn(async move {
+                aggregator
+                    .run(|summaries| {
+                        let bridge = bridge.clone();
+                        let halt = halt_tx.clone();
+                        async move {
+                            let action = bridge.report_and_enforce(&summaries).await;
+                            match action {
+                                tether_bridge::VerdictAction::Terminate => {
+                                    // Signal the main wait loop to terminate the sandbox.
+                                    let _ = halt.send(());
+                                }
+                                tether_bridge::VerdictAction::TightenPolicy { drift_score } => {
+                                    // TODO: Remove non-essential network policy rules via
+                                    // OPA hot-reload. For now, log the event. The bridge
+                                    // emits its own TETHER_CAUTION warning.
+                                    debug!(
+                                        drift_score,
+                                        "Policy tightening requested by Tether (not yet implemented)"
+                                    );
+                                }
+                                tether_bridge::VerdictAction::Continue => {}
                             }
                         }
                     })
@@ -620,17 +687,34 @@ pub async fn run_sandbox(
         }
     }
 
-    // Wait for process with optional timeout
+    // Wait for process with optional timeout, or Tether halt signal.
     let result = if timeout_secs > 0 {
-        if let Ok(result) = timeout(Duration::from_secs(timeout_secs), handle.wait()).await {
-            result
-        } else {
-            error!("Process timed out, killing");
-            handle.kill()?;
-            return Ok(124); // Standard timeout exit code
+        tokio::select! {
+            r = timeout(Duration::from_secs(timeout_secs), handle.wait()) => {
+                match r {
+                    Ok(result) => result,
+                    Err(_) => {
+                        error!("Process timed out, killing");
+                        handle.kill()?;
+                        return Ok(124); // Standard timeout exit code
+                    }
+                }
+            }
+            _ = tether_halt_rx.recv() => {
+                warn!("Tether issued halt — terminating sandbox due to high drift");
+                handle.kill()?;
+                return Ok(125); // Tether halt exit code
+            }
         }
     } else {
-        handle.wait().await
+        tokio::select! {
+            r = handle.wait() => r,
+            _ = tether_halt_rx.recv() => {
+                warn!("Tether issued halt — terminating sandbox due to high drift");
+                handle.kill()?;
+                return Ok(125); // Tether halt exit code
+            }
+        }
     };
 
     let status = result.into_diagnostic()?;
