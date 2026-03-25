@@ -3,6 +3,7 @@
 
 //! HTTP CONNECT proxy with OPA policy evaluation and process-identity binding.
 
+use crate::activity_aggregator::ActivityEvent;
 use crate::denial_aggregator::DenialEvent;
 use crate::identity::BinaryIdentityCache;
 use crate::l7::tls::ProxyTlsState;
@@ -133,6 +134,7 @@ impl ProxyHandle {
         inference_ctx: Option<Arc<InferenceContext>>,
         secret_resolver: Option<Arc<SecretResolver>>,
         denial_tx: Option<mpsc::UnboundedSender<DenialEvent>>,
+        activity_tx: Option<mpsc::UnboundedSender<ActivityEvent>>,
     ) -> Result<Self> {
         // Use override bind_addr, fall back to policy http_addr, then default
         // to loopback:3128.  The default allows the proxy to function when no
@@ -163,9 +165,10 @@ impl ProxyHandle {
                         let inf = inference_ctx.clone();
                         let resolver = secret_resolver.clone();
                         let dtx = denial_tx.clone();
+                        let atx = activity_tx.clone();
                         tokio::spawn(async move {
                             if let Err(err) = handle_tcp_connection(
-                                stream, opa, cache, spid, tls, inf, resolver, dtx,
+                                stream, opa, cache, spid, tls, inf, resolver, dtx, atx,
                             )
                             .await
                             {
@@ -266,6 +269,7 @@ async fn handle_tcp_connection(
     inference_ctx: Option<Arc<InferenceContext>>,
     secret_resolver: Option<Arc<SecretResolver>>,
     denial_tx: Option<mpsc::UnboundedSender<DenialEvent>>,
+    activity_tx: Option<mpsc::UnboundedSender<ActivityEvent>>,
 ) -> Result<()> {
     let mut buf = vec![0u8; MAX_HEADER_BYTES];
     let mut used = 0usize;
@@ -310,6 +314,7 @@ async fn handle_tcp_connection(
             entrypoint_pid,
             secret_resolver,
             denial_tx.as_ref(),
+            activity_tx.as_ref(),
         )
         .await;
     }
@@ -525,6 +530,24 @@ async fn handle_tcp_connection(
         reason = "",
         connect_msg,
     );
+
+    // Emit activity event for allowed CONNECT (L4-level).
+    // L7-level events are emitted separately from the relay path.
+    if let Some(ref atx) = activity_tx {
+        let _ = atx.send(ActivityEvent {
+            host: host_lc.clone(),
+            port,
+            binary: binary_str.clone(),
+            ancestors: decision
+                .ancestors
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect(),
+            matched_policy: policy_str.to_string(),
+            l7_method: None,
+            l7_path: None,
+        });
+    }
 
     if let Some(l7_config) = l7_config {
         // Clone engine for per-tunnel L7 evaluation (cheap: shares compiled policy via Arc)
@@ -1569,6 +1592,7 @@ async fn handle_forward_proxy(
     entrypoint_pid: Arc<AtomicU32>,
     secret_resolver: Option<Arc<SecretResolver>>,
     denial_tx: Option<&mpsc::UnboundedSender<DenialEvent>>,
+    activity_tx: Option<&mpsc::UnboundedSender<ActivityEvent>>,
 ) -> Result<()> {
     // 1. Parse the absolute-form URI
     let (scheme, host, port, path) = match parse_proxy_uri(target_uri) {
@@ -1814,6 +1838,23 @@ async fn handle_forward_proxy(
         reason = "",
         "FORWARD",
     );
+
+    // Emit activity event for allowed forward proxy request.
+    if let Some(atx) = activity_tx {
+        let _ = atx.send(ActivityEvent {
+            host: host_lc.clone(),
+            port,
+            binary: binary_str.clone(),
+            ancestors: decision
+                .ancestors
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect(),
+            matched_policy: policy_str.to_string(),
+            l7_method: Some(method.to_string()),
+            l7_path: Some(path.clone()),
+        });
+    }
 
     // 9. Rewrite request and forward to upstream
     let rewritten = rewrite_forward_request(buf, used, &path, secret_resolver.as_deref());
