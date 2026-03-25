@@ -343,6 +343,11 @@ impl TetherBridge {
     }
 }
 
+/// Return the env var value if it is set and non-empty, otherwise `None`.
+fn non_empty_env(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|v| !v.is_empty())
+}
+
 /// Create a [`TetherBridge`] from policy config or environment variables.
 ///
 /// Priority: policy config (from YAML `tether:` section) > env vars.
@@ -369,6 +374,10 @@ pub fn make_tether_bridge() -> Option<Arc<TetherBridge>> {
 }
 
 /// Create a [`TetherBridge`] from an explicit policy config, with env var fallback.
+///
+/// When policy config is present, env vars override individual fields so the
+/// orchestrator can inject dynamic values (e.g. `TETHER_TASK_ID`) at sandbox
+/// creation time without rebuilding the policy YAML.
 pub fn make_tether_bridge_from_policy(
     policy_config: Option<&openshell_policy::TetherDef>,
 ) -> Option<Arc<TetherBridge>> {
@@ -376,15 +385,29 @@ pub fn make_tether_bridge_from_policy(
         if !cfg.enabled {
             return None;
         }
-        let mode = match cfg.mode.as_str() {
-            "enforce" => TetherMode::Enforce,
+        // Env vars override policy fields — the orchestrator sets TETHER_TASK_ID
+        // dynamically per sandbox run while the policy YAML ships static defaults.
+        let endpoint = non_empty_env("TETHER_ENDPOINT")
+            .unwrap_or_else(|| cfg.endpoint.clone());
+        let task_id = non_empty_env("TETHER_TASK_ID")
+            .unwrap_or_else(|| cfg.task_id.clone());
+        let mode = match std::env::var("TETHER_MODE")
+            .ok()
+            .as_deref()
+            .or(Some(cfg.mode.as_str()))
+        {
+            Some("enforce") => TetherMode::Enforce,
             _ => TetherMode::Monitor,
         };
-        (cfg.endpoint.clone(), cfg.task_id.clone(), mode, 10u64)
+        let timeout_secs: u64 = std::env::var("TETHER_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(10);
+        (endpoint, task_id, mode, timeout_secs)
     } else {
-        // Env var fallback
-        let endpoint = std::env::var("TETHER_ENDPOINT").ok()?;
-        let task_id = std::env::var("TETHER_TASK_ID").ok()?;
+        // Pure env var mode — no policy YAML available
+        let endpoint = non_empty_env("TETHER_ENDPOINT")?;
+        let task_id = non_empty_env("TETHER_TASK_ID")?;
         let mode = match std::env::var("TETHER_MODE").as_deref() {
             Ok("enforce") => TetherMode::Enforce,
             _ => TetherMode::Monitor,

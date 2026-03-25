@@ -607,8 +607,11 @@ pub async fn run_sandbox(
             }
         });
 
-        // Create Tether bridge if configured (opt-in via env vars).
-        let tether = tether_bridge::make_tether_bridge();
+        // Create Tether bridge if configured (policy YAML > env vars).
+        let tether_config = openshell_policy::load_tether_config(None);
+        let tether = tether_bridge::make_tether_bridge_from_policy(
+            tether_config.as_ref(),
+        );
 
         // Spawn denial aggregator (gRPC mode only, when proxy is active).
         if let Some(rx) = denial_rx {

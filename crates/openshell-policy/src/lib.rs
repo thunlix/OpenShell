@@ -335,6 +335,7 @@ fn from_proto(policy: &SandboxPolicy) -> PolicyFile {
         landlock,
         process,
         network_policies,
+        tether: None,
     }
 }
 
@@ -400,13 +401,19 @@ pub fn parse_tether_config(yaml: &str) -> Option<TetherDef> {
 
 /// Load Tether config from the same policy file as the sandbox policy.
 ///
-/// Reads from `cli_path`, then `OPENSHELL_SANDBOX_POLICY` env var.
+/// Reads from `cli_path`, then `OPENSHELL_SANDBOX_POLICY` env var, then
+/// the well-known container policy paths (`/etc/openshell/policy.yaml`,
+/// `/etc/navigator/policy.yaml`).
 /// Returns `None` if no policy file is found or Tether is not configured.
 pub fn load_tether_config(cli_path: Option<&str>) -> Option<TetherDef> {
     let contents = if let Some(p) = cli_path {
         std::fs::read_to_string(p).ok()?
     } else if let Ok(policy_path) = std::env::var("OPENSHELL_SANDBOX_POLICY") {
         std::fs::read_to_string(policy_path).ok()?
+    } else if std::path::Path::new(CONTAINER_POLICY_PATH).exists() {
+        std::fs::read_to_string(CONTAINER_POLICY_PATH).ok()?
+    } else if std::path::Path::new(LEGACY_CONTAINER_POLICY_PATH).exists() {
+        std::fs::read_to_string(LEGACY_CONTAINER_POLICY_PATH).ok()?
     } else {
         return None;
     };
